@@ -261,8 +261,15 @@ void sun(){
 |t   i   m   e   |
 |t1   dhtT  t4   |
 |sun  t2    ____ |
-| ?   %     t5   |
+|t3   %     t5   |
 _________________
+
+ _________________________
+|      t   i   m   e      |
+|tверх.пр   dhtT  tнагрев |
+|sun      tниз.лв    ____ |
+|tверх.лв    %    tниз.пр |
+__________________________
 */
 void printScreen() {
   u8g2.clearBuffer();         // clear the internal memory
