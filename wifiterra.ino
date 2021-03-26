@@ -7,7 +7,7 @@
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
 #include <DHT_U.h>
-#include "CTBot.h"
+#include <CTBot.h>
 CTBot myBot;  
 
 #define ONE_WIRE_BUS D4
@@ -22,8 +22,13 @@ DallasTemperature sensors(&oneWire);
 RtcDS1307<TwoWire> Rtc(Wire);
 bool first_start = true;
 const int hoodPin = D6; 
-const int loadPin = D5;
-const int ledPin = D7; //TODO: введен новый пин под нагрузку
+const float criticalTempHeater = 34.00;
+const float criticalTempHight = 27.00;
+const float criticalTempLow = 23.00;
+const float criticalHumHight = 93.00;
+const float criticalHumLow = 69.00;
+const int loadPin = D8;
+const int ledPin = D5; //TODO: введен новый пин под нагрузку
 const int admin_id = 147391724; // my id in telegram
 const float sensor_tolerance = 2.0;
 /*sensors*/
@@ -37,15 +42,12 @@ char datestring[20];
 int duty_position = 400;
 int sun_step = 10;
 bool duty_mode;
-bool sunrize, sunset;
-int sun_position;
-/*end sun */
-/*hood - fan*/
-int hood_pos = 0;
-bool hood_auto = true;
+bool sunset, sunrize = false;
+int sun_pos, hood_pos = 0;
+bool hood_auto, sun_auto = false;
 const int hood_step = 100;
-/*end_hood - fan*/
-bool debug = true;
+bool debug = false;
+String TlgMes = "";
 /* Temperature 
 sensor addresses:
   Sensor 1 : 0x28, 0xFF, 0xAA, 0x9D, 0x61, 0xE0, 0xB6, 0x2E
@@ -69,11 +71,8 @@ String token = "1659853725:AAEGzJHnJgrPVbTgL1FbdLn9tLtPPNaQN7I";
 
 void setup() {
   Serial.begin(9600);
-  sun_position=0;
-  sunrize=false;
-  sunset=false;
-  sunrize=true;
   pinMode(hoodPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
   dht.begin();
   Rtc.Begin();
   u8g2.begin();
@@ -116,28 +115,23 @@ void initDsSensors(){
 /* end init subsystem*/
 
 void loop() {
-  fn_hood_auto(); // влажность авто
-  update_analog_pins();
-  sun();
+  wifiterra_auto();
+  fn_hood_control();
+  telegramAlert();
+  update_workload_pins();
   sensor_polling();
-  pullup();
   printScreen();
-  if(sun_position >= 1024){
-    night_mode();
-    }
-  else {
-    morning_mode();
-  }
   TBMessage msg;
   if (myBot.getNewMessage(msg)) {
-    if (msg.text == "/status"){
-      myBot.sendMessage(msg.sender.id, String(msg.sender.id) + "msg:"+ fn_telegram_status());
-      }
    telegramHoodEvent(msg);
   }
-  delay(1000);
-  //duty_mode_on();
+  delay(100);
 }
+/*---general ----*/
+void wifiterra_auto(){
+  hood_auto = true;
+}
+/*---end general ----*/
 /* <<<---------------------- SENSORS ----------------------------->>>*/
 void sensor_polling(){
   checkDht();
@@ -207,14 +201,14 @@ void checkTemp(){
   }
  /* <<<---------------------- END SENSORS ----------------------------->>>*/ 
  
-void pullup(){
-  if (t1<23){
-    digitalWrite(loadPin, 1);
-    }
-  else {
-    digitalWrite(loadPin, 0);
-    }
-}
+//void pullup(){
+//  if (t1<23){
+//    digitalWrite(loadPin, 1);
+//    }
+//  else {
+//    digitalWrite(loadPin, 0);
+//    }
+//}
 
 /*<<<-----------------------SUN ------------------------------------>>>*/
 void night_mode(){
@@ -244,13 +238,13 @@ void duty_mode_off(){
     }
   }
 void sun(){
-  if(sun_position <= 1024 && sunrize && !duty_mode){
-    sun_position+=sun_step;
-    analogWrite(ledPin, sun_position);
+  if(sun_pos <= 1024 && sunrize && !duty_mode){
+    sun_pos+=sun_step;
+    analogWrite(ledPin, sun_pos);
     }
-  if (sun_position >= 0 && sunset && !duty_mode){
-    sun_position-=sun_step;
-    analogWrite(ledPin, sun_position);
+  if (sun_pos >= 0 && sunset && !duty_mode){
+    sun_pos-=sun_step;
+    analogWrite(ledPin, sun_pos);
   }
 }
 /*<<<----------------------- END SUN ------------------------------------>>>*/
@@ -261,15 +255,8 @@ void sun(){
 |t   i   m   e   |
 |t1   dhtT  t4   |
 |sun  t2    ____ |
-|t3   %     t5   |
+| ?   %     t5   |
 _________________
-
- _________________________
-|      t   i   m   e      |
-|tверх.пр   dhtT  tнагрев |
-|sun      tниз.лв    ____ |
-|tверх.лв    %    tниз.пр |
-__________________________
 */
 void printScreen() {
   u8g2.clearBuffer();         // clear the internal memory
@@ -289,7 +276,7 @@ void printScreen() {
   u8g2.setCursor(88,64);
   u8g2.print(t5,2); //t5
   u8g2.setCursor(0,44);
-  u8g2.print(sun_position); //sun
+  u8g2.print(sun_pos); //sun
   u8g2.setCursor(44,64);
   u8g2.print(dht_hum,2); // dht %
   u8g2.setCursor(44,30);
@@ -297,19 +284,120 @@ void printScreen() {
   u8g2.sendBuffer();          // transfer internal memory to the display
 }
 /* <<<-------------------- END SCREEN ------------------------------------- >>> */
+/*<<<----------------------TELEGRAM BOT ALERTING----------------------------->>>*/
+  /*
+ ________________
+|t   i   m   e   |
+|t1   dhtT  t4   |
+|sun  t2    ____ |
+|t3   %     t5   |
+_________________
+   _________________________
+|      t   i   m   e      |
+|tверх.пр   dhtT  tнагрев |
+|sun      tниз.лв    ____ |
+|tверх.лв    %    tниз.пр |
+__________________________
+разбор:
+t1   - tверх.лв
+t3   - tверх.пр
+t2   - tниз.лв
+t5   - tниз.пр
+t4   - tнагрев
+dhtT - dhtT
+dht% - %
+*/
 
+/*<<<---------------------- ACTION ON ALERT FUNCTION ------------------------------------>>>*/
+// Функции по обработки алертов
+// Вытяжка: если выше *criticalHumHight* - включаем на *800*
+// Если ниже *criticalHumLow* - выключаем 
+void fn_hood_control(){
+  if(hood_auto){
+      if(dht_hum >= criticalHumHight){
+        hood_pos = 800;
+      }
+      else if(dht_hum <= criticalHumLow){
+        hood_pos = 0;
+      }
+    }
+  }
+/*<<<---------------------- END ACTION ON ALERT FUNCTION -------------------------------->>>*/
+/* FUNCTIONS */
+
+void telegramAlert(){
+  if (dht_t == 0.00)
+  {
+    return;
+  }
+   String alert = "";
+   /*
+   алертинг по:
+   Т нагрев
+   Т по среднему датчику (дхц)
+   Т по большему значению нижних датчиков (Т? Т?)
+   Все Больше 26 град цельс (кроме нагрева - там можно 32)
+   Влажность:
+   Меньше 70
+   Больше 90
+   */
+// пока делаем вывод статуса с припиской алерт.
+// раз больше 26 (кроме нагрева - там можно 32) - бахаем условие по всем датчикам через или...
+// а вот вам транзистор в руки! Имя переменной не получить (за байт). Иффуем!
+// пока по линиям верх-низ: важно, где перегрев
+// <-------------- Высокая температура --------------------->
+   if ( dht_t >= criticalTempHight && t4 >= criticalTempHeater){
+      alert += "Высокая температура сред: "+float_param_to_str("",dht_t)+"\n";
+      }
+   if ( (t2 >= criticalTempHight || t5 >= criticalTempHight)  && t4 >= criticalTempHeater){
+      alert += "Высокая температура низ: "+float_param_to_str("",t2)+" "+float_param_to_str("",t5)+"\n";
+      }
+   if ( (t3 >= criticalTempHight || t1 >= criticalTempHight)  && t4 >= criticalTempHeater){
+      alert += "Высокая температура верх: "+float_param_to_str("",t1)+" "+float_param_to_str("",t3)+"\n";
+      }
+   if ( t4 >= criticalTempHeater){
+      alert += "Высокая температура нагревателя: "+float_param_to_str("",t4)+"\n";
+      }
+// <-------------- Конец Высокая температура --------------->
+// <-------------- Низкая температура ---------------------->
+   if ( dht_t <= criticalTempLow){
+      alert += "Низкая температура сред: "+float_param_to_str("",dht_t)+"\n";
+      }
+   if ( t2 <= criticalTempLow || t5 <= criticalTempLow){
+      alert += "Низкая температура низ: "+float_param_to_str("",t2)+" "+float_param_to_str("",t5)+"\n";
+      }
+   if ( t3 <= criticalTempLow || t1 <= criticalTempLow){
+      alert += "Низкая температура верх: "+float_param_to_str("",t1)+" "+float_param_to_str("",t3)+"\n";
+      }
+// <-------------- Конец Низкая температура ---------------->
+// <------------------- Влажность -------------------------->
+   if ( dht_hum <= criticalHumLow){
+      alert += "низкая влажность: "+float_param_to_str("",dht_hum)+"\n";
+      }
+   if ( dht_hum >= criticalHumHight){
+      alert += "Высокая влажность: "+float_param_to_str("",dht_hum)+"\n";
+      }
+// <---------------- Конец Влажность ----------------------->
+   if(alert.length() > 0){
+   myBot.sendMessage(admin_id, alert+ "Сделай чтобы не спамило! У меня есть часы)))");
+   }
+  }
+/*<<<----------------------END TELEGRAM BOT ALERTING------------------------->>>*/
 
 /*<<<---------------------TELEGRAM BOT FUNCTIONS--------------------------->>>*/ 
 void telegramHoodEvent(TBMessage t_msg){
-  if (t_msg.text == "/hood:auto"){
-      hood_auto = true;
-      hood_pos = 500;
-      myBot.sendMessage(t_msg.sender.id, "hood auto at" + String(hood_pos));
+    if (t_msg.text == "/status"){
+      myBot.sendMessage(t_msg.sender.id, fn_telegram_status());
       }
     else if (t_msg.text == "/hood:off"){
       hood_auto = false;
       hood_pos = 0;
       myBot.sendMessage(t_msg.sender.id, String(hood_pos));
+      }
+    else if (t_msg.text == "/hood:auto"){
+      hood_auto = true;
+      hood_pos = 0;
+      myBot.sendMessage(t_msg.sender.id, "Hum auto on");
       }
     else if (t_msg.text == "/hood:up"){
       hood_auto = false;
@@ -336,64 +424,62 @@ void telegramHoodEvent(TBMessage t_msg){
       hood_pos = 1024;
       myBot.sendMessage(t_msg.sender.id, String(hood_pos));
       }
+    else if (t_msg.text == "/sun:low"){
+      sun_auto = false;
+      sun_pos = 100;
+      myBot.sendMessage(t_msg.sender.id, String(sun_pos));
+      }
+    else if (t_msg.text == "/sun:mean"){
+      sun_auto = false;
+      sun_pos = 600;
+      myBot.sendMessage(t_msg.sender.id, String(sun_pos));
+      }
+    else if (t_msg.text == "/sun:hight"){
+      sun_auto = false;
+      sun_pos = 1024;
+      myBot.sendMessage(t_msg.sender.id, String(sun_pos));
+      }
+    else if (t_msg.text == "/sun:off"){
+      sun_auto = false;
+      sun_pos = 0;
+      myBot.sendMessage(t_msg.sender.id, String(sun_pos));
+      }
   }
+  /*
+ ________________
+|t   i   m   e   |
+|t1   dhtT  t4   |
+|sun  t2    ____ |
+|t3   %     t5   |
+_________________
+   _________________________
+|      t   i   m   e      |
+|tверх.пр   dhtT  tнагрев |
+|sun      tниз.лв    ____ |
+|tверх.лв    %    tниз.пр |
+__________________________
+*/
 String fn_telegram_status(){
-  String msg = float_param_to_str("ds1",t1)+","+
-  float_param_to_str("ds2",t2)+","+
-  float_param_to_str("ds3",t3)+","+
-  float_param_to_str("ds4",t4)+","+
-  float_param_to_str("ds5",t5)+","+
-  float_param_to_str("dht_t",dht_t)+","+
-  float_param_to_str("dht_hum",dht_hum);
+  String msg = "|-----------------------|\n"
+  "|"+ float_param_to_str("-",t3)+"----"+float_param_to_str("-",t1)+"-|\n"+
+  "|-------"+float_param_to_str("-",dht_t)+"-------|\n"+
+  "|"+ float_param_to_str("-",t2)+"----"+float_param_to_str("-",t5)+"-|\n"+
+   "|-----------------------|\n" +
+  float_param_to_str("|  Нагрев: ",t4)+"\n"+
+  float_param_to_str("|  Свет:   ",sun_pos)+"\n"+
+  float_param_to_str("|  Влажность: ",dht_hum);
   if(hood_pos > 0){
-    msg += "; fan is " + String(hood_pos); //(1024 - hood_pos)*5.24 );
+    msg += "\n|-- fan is " + String(hood_pos)+"---|"; 
     }
+  +"\n|-----------------------|\n";
+ 
   return msg;
 }
 /*<<<--------------------- END TELEGRAM BOT FUNCTIONS ------------------------->>>*/ 
 
-/* FUNCTIONS */
-void fn_hood_auto(){
-  bool alert = dht_hum > 90 and dht_hum < 100;
-  float hum = fn_sensor_average(p_dht_hum, dht_hum, alert);
-  if (hood_auto){
-      if(p_dht_hum >= 90.0){
-        hood_pos = 1024;
-      }
-      else if(p_dht_hum <= 70.0){
-        hood_pos = 0;
-      }
-      else if(p_dht_hum >= 80.0){
-        hood_pos = 900;
-      } 
-      if(p_dht_hum == 90.0 || p_dht_hum == 80.0 || p_dht_hum == 70.0) {
-        String mes =  "fn_hood_auto:"+String(hood_pos)+"; "+float_param_to_str("dht_hum",hum);
-        myBot.sendMessage(admin_id,mes);
-      }
-    }
-    p_dht_hum = hum;
-  }
-  
- 
-void update_analog_pins(){
+void update_workload_pins(){
   analogWrite(hoodPin, hood_pos);
-  }
-  
-float fn_sensor_check(enum sensors_type){
-  switch (sensors_type) {
-  case SENSORS_TYPE_References_e::HUM: {
-    /* do stuff */
-    break;
-  }
-  case SENSORS_TYPE_References_e::TEMP: {
-    /* do stuff */
-    break;
-  }
-  default: {
-    break;
-  }
-
-}
+  analogWrite(ledPin, sun_pos);
   }
 
 float fn_sensor_average(float previos, float current, bool alert){
@@ -409,13 +495,10 @@ bool fn_sensor_true(float previos, float current, bool alert){
     return true;
   else return false;
   }
-void fn_set_hood_pos(float pos) {
-    hood_pos = pos;
-  }
-  
+
 String float_param_to_str(String param, float value){
   char outstr[15];
   dtostrf(value,7, 3, outstr);
-  return param + ":" + value;
+  return param + value;
 }
 /* END FUNCTIONS */
