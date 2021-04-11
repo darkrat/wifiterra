@@ -1,4 +1,5 @@
 #include <OneWire.h>
+#include <EEPROM.h>
 #include <DallasTemperature.h>
 #include <Wire.h>
 #include <Arduino.h>
@@ -8,11 +9,12 @@
 #include <DHT.h>
 #include <DHT_U.h>
 #include <CTBot.h>
+#include <ArduinoOTA.h>
 CTBot myBot;  
 
 #define ONE_WIRE_BUS D4
 #define DHTPIN D7
-#define DHTTYPE    DHT11
+#define DHTTYPE DHT11
 #define countof(a) (sizeof(a) / sizeof(a[0]))
 DHT_Unified dht(DHTPIN, DHTTYPE);
 
@@ -20,21 +22,49 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, SCL, SDA, U8X8_PIN_NONE);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 RtcDS1307<TwoWire> Rtc(Wire);
+String app_version = "v1.0.2";
 bool first_start = true;
-const int hoodPin = D6; 
-const float criticalTempHeater = 34.00;
-const float criticalTempHight = 27.00;
-const float criticalTempLow = 23.00;
-const float criticalHumHight = 93.00;
-const float criticalHumLow = 69.00;
-const int loadPin = D8;
+const int hoodPin = D8; 
+const int loadPin = D6;
 const int ledPin = D5; //TODO: введен новый пин под нагрузку
-const int admin_id = 147391724; // my id in telegram
+/* Properties*/
+typedef struct Props {
+  float criticalTempHeater;
+  float criticalTempHight;
+  float criticalTempLow;
+  float criticalHumHight;
+  float humNormal;
+  float criticalHumLow;
+  int admin_id;
+  int sun_level;
+  int hoodDefaultPos;
+  int chat_id;
+  String botName;
+} Props;
+Props props;
+
+struct Props getDefaultProps(){
+  Props props = {
+    34.00,
+    27.00,
+    23.00,
+    90.00,
+    85.00,
+    69.00,
+    147391724,
+    30,
+    800,
+    -1001223041539,
+    "wifiterrabot"
+  };
+  return props;
+  }
+/* End Properties*/
 const float sensor_tolerance = 2.0;
 /*sensors*/
 enum sensors_type { HUM, TEMP};
 int deviceCount = 0;
-float p_t1,p_t2,p_t3,p_t4,p_t5,p_dht_t,p_dht_hum; //previos_sensors
+float mean_temp;
 float t1,t2,t3,t4,t5,dht_t,dht_hum; //sensors
 /*end sensors*/
 char datestring[20];
@@ -46,7 +76,7 @@ bool sunset, sunrize = false;
 int sun_pos, hood_pos = 0;
 bool hood_auto, sun_auto = false;
 const int hood_step = 100;
-bool debug = false;
+bool debug = true;
 String TlgMes = "";
 /* Temperature 
 sensor addresses:
@@ -68,7 +98,53 @@ String ssid = "ASUS-Sol";
 String pass = "wifihoshii";
 String token = "1659853725:AAEGzJHnJgrPVbTgL1FbdLn9tLtPPNaQN7I";   
 /* END TELEGRAM*/
-
+void OTA(){
+  u8g2.setFont(u8g2_font_iranian_sans_14_t_all);
+  // Port defaults to 8266
+  // ArduinoOTA.setPort(8266);
+ 
+  // Hostname defaults to esp8266-[ChipID]
+  // ArduinoOTA.setHostname("myesp8266");
+ 
+  // No authentication by default
+  // ArduinoOTA.setPassword((const char *)"123");
+  ArduinoOTA.onStart([]() {
+    u8g2.clearBuffer();
+    u8g2.setCursor(0,0);
+    u8g2.print("Start OTA");
+    u8g2.sendBuffer();
+  });
+  ArduinoOTA.onEnd([]() {
+    u8g2.clearBuffer();
+    u8g2.setCursor(0,0);
+    u8g2.print("End OTA");
+    u8g2.sendBuffer();
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    u8g2.clearBuffer();
+    u8g2.setCursor(0,0);
+    u8g2.print(app_version);
+    u8g2.setCursor(0,44);
+    u8g2.print("Update:");
+    u8g2.print((progress / (total / 100),1));
+    u8g2.print("%");
+    u8g2.sendBuffer();
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    String _error = "";
+    if (error == OTA_AUTH_ERROR) _error+=("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) _error+=("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) _error+=("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) _error+=("Receive Failed");
+    else if (error == OTA_END_ERROR) _error+=("End Failed");
+    u8g2.clearBuffer();
+    u8g2.setCursor(0,44);
+    u8g2.print("E: "+_error);
+    u8g2.sendBuffer();
+  });
+  ArduinoOTA.begin();
+  }
 void setup() {
   Serial.begin(9600);
   pinMode(hoodPin, OUTPUT);
@@ -78,6 +154,10 @@ void setup() {
   u8g2.begin();
   initDsSensors();
   initTelegramBot();
+  OTA();
+  props = getDefaultProps();
+  myBot.sendMessage(props.admin_id, "wifi_terra "+app_version+" online!");
+  myBot.sendMessage(props.chat_id, "wifi_terra "+app_version+" online!");
 }
 
 /* init subsystem*/
@@ -89,7 +169,6 @@ void initTelegramBot(){
   if (myBot.testConnection()){
     if(debug)
     Serial.println("\ntestConnection OK");
-    myBot.sendMessage(admin_id, "wifi_terra online!");
   }
   else
     if(debug)
@@ -115,9 +194,10 @@ void initDsSensors(){
 /* end init subsystem*/
 
 void loop() {
+  ArduinoOTA.handle();
   wifiterra_auto();
   fn_hood_control();
-  telegramAlert();
+//  telegramAlert();
   update_workload_pins();
   sensor_polling();
   printScreen();
@@ -310,22 +390,29 @@ dht% - %
 
 /*<<<---------------------- ACTION ON ALERT FUNCTION ------------------------------------>>>*/
 // Функции по обработки алертов
-// Вытяжка: если выше *criticalHumHight* - включаем на *800*
+// Вытяжка: если выше *criticalHumHight* - включаем на *props.hoodDefaultPos*
 // Если ниже *criticalHumLow* - выключаем 
 void fn_hood_control(){
   if(hood_auto){
-      if(dht_hum >= criticalHumHight){
-        hood_pos = 800;
+      if(dht_hum >= props.criticalHumHight){
+        hood_pos = props.hoodDefaultPos;
       }
-      else if(dht_hum <= criticalHumLow){
+      else if(dht_hum <= props.humNormal){
         hood_pos = 0;
       }
     }
   }
 /*<<<---------------------- END ACTION ON ALERT FUNCTION -------------------------------->>>*/
 /* FUNCTIONS */
+byte tempAlertTriggers = 0;
+byte dhtAlertTriggers = 0;
+/*
 
+*/
+String alert_previos = "";
 void telegramAlert(){
+  float mean_temp = (t1+t2+t3+t5+dht_t)/5;
+  clearAlerts();
   if (dht_t == 0.00)
   {
     return;
@@ -346,46 +433,88 @@ void telegramAlert(){
 // а вот вам транзистор в руки! Имя переменной не получить (за байт). Иффуем!
 // пока по линиям верх-низ: важно, где перегрев
 // <-------------- Высокая температура --------------------->
-   if ( dht_t >= criticalTempHight && t4 >= criticalTempHeater){
-      alert += "Высокая температура сред: "+float_param_to_str("",dht_t)+"\n";
+   if ( mean_temp >= props.criticalTempHight && !bitRead(tempAlertTriggers,1)){
+      alert += "Высокая температура средняя: "+float_param_to_str("",mean_temp
+      )+"\n";
+      bitSet(tempAlertTriggers, 1); //bitClear
       }
-   if ( (t2 >= criticalTempHight || t5 >= criticalTempHight)  && t4 >= criticalTempHeater){
+   if ( (t2 >= props.criticalTempHight || t5 >= props.criticalTempHight)  && t4 >= props.criticalTempHeater  && !bitRead(tempAlertTriggers,2)){
       alert += "Высокая температура низ: "+float_param_to_str("",t2)+" "+float_param_to_str("",t5)+"\n";
-      }
-   if ( (t3 >= criticalTempHight || t1 >= criticalTempHight)  && t4 >= criticalTempHeater){
+      bitSet(tempAlertTriggers, 2); //bitClear
+      } 
+   if ( (t3 >= props.criticalTempHight || t1 >= props.criticalTempHight)  && t4 >= props.criticalTempHeater  && !bitRead(tempAlertTriggers,3)){
       alert += "Высокая температура верх: "+float_param_to_str("",t1)+" "+float_param_to_str("",t3)+"\n";
+      bitSet(tempAlertTriggers, 3); //bitClear
       }
-   if ( t4 >= criticalTempHeater){
+   if ( t4 >= props.criticalTempHeater  && !bitRead(tempAlertTriggers,4)){
       alert += "Высокая температура нагревателя: "+float_param_to_str("",t4)+"\n";
-      }
+      bitSet(tempAlertTriggers, 4);
+      } 
 // <-------------- Конец Высокая температура --------------->
 // <-------------- Низкая температура ---------------------->
-   if ( dht_t <= criticalTempLow){
-      alert += "Низкая температура сред: "+float_param_to_str("",dht_t)+"\n";
-      }
-   if ( t2 <= criticalTempLow || t5 <= criticalTempLow){
+   if (mean_temp <= props.criticalTempLow && !bitRead(tempAlertTriggers,5)){
+      alert += "Низкая температура средняя: "+float_param_to_str("",mean_temp)+"\n";
+      bitSet(tempAlertTriggers, 5);
+      } 
+   if ( (t2 <= props.criticalTempLow || t5 <= props.criticalTempLow) && !bitRead(tempAlertTriggers,6)){
       alert += "Низкая температура низ: "+float_param_to_str("",t2)+" "+float_param_to_str("",t5)+"\n";
-      }
-   if ( t3 <= criticalTempLow || t1 <= criticalTempLow){
+      bitSet(tempAlertTriggers, 6);
+      } 
+   if ( (t3 <= props.criticalTempLow || t1 <= props.criticalTempLow) && !bitRead(tempAlertTriggers,7)){
       alert += "Низкая температура верх: "+float_param_to_str("",t1)+" "+float_param_to_str("",t3)+"\n";
-      }
+      bitSet(tempAlertTriggers, 7);
+      } 
 // <-------------- Конец Низкая температура ---------------->
 // <------------------- Влажность -------------------------->
-   if ( dht_hum <= criticalHumLow){
+   if ( dht_hum <= props.criticalHumLow  && !bitRead(dhtAlertTriggers,1)){
       alert += "низкая влажность: "+float_param_to_str("",dht_hum)+"\n";
-      }
-   if ( dht_hum >= criticalHumHight){
+      bitSet(dhtAlertTriggers, 1);
+      } 
+   if ( dht_hum >= props.criticalHumHight  && !bitRead(dhtAlertTriggers,2)){
       alert += "Высокая влажность: "+float_param_to_str("",dht_hum)+"\n";
-      }
+      bitSet(dhtAlertTriggers, 2);
+      } 
 // <---------------- Конец Влажность ----------------------->
-   if(alert.length() > 0){
-   myBot.sendMessage(admin_id, alert+ "Сделай чтобы не спамило! У меня есть часы)))");
+   if(alert.length() > 0 && alert_previos != alert){
+   alert_previos = alert;
+   myBot.sendMessage(props.admin_id, alert);
+   myBot.sendMessage(props.chat_id, alert);
    }
   }
+void clearAlerts(){
+  if (dht_hum < props.criticalHumHight){
+        bitClear(dhtAlertTriggers, 2); //bitClear
+        }
+  if (dht_hum > props.criticalHumLow){
+        bitClear(tempAlertTriggers, 7); //bitClear
+        }
+  if (t3 > props.criticalTempLow && t1 > props.criticalTempLow){
+        bitClear(tempAlertTriggers, 7); //bitClear
+        }
+  if (t2 > props.criticalTempLow && t5 > props.criticalTempLow){
+        bitClear(tempAlertTriggers, 6); //bitClear
+        }
+  if (mean_temp > props.criticalTempLow){
+        bitClear(tempAlertTriggers, 5); //bitClear
+        }
+  if (t4 < props.criticalTempHeater){
+        bitClear(tempAlertTriggers, 4); //bitClear
+        }
+  if ( (t3 < props.criticalTempHight && t1 < props.criticalTempHight)){
+        bitClear(tempAlertTriggers, 3); //bitClear
+        }
+  if ( (t2 < props.criticalTempHight && t5 < props.criticalTempHight)){
+        bitClear(tempAlertTriggers, 2); //bitClear
+        }
+  if(mean_temp < props.criticalTempHight){
+        bitClear(tempAlertTriggers, 1); //bitClear
+        }
+}
 /*<<<----------------------END TELEGRAM BOT ALERTING------------------------->>>*/
 
 /*<<<---------------------TELEGRAM BOT FUNCTIONS--------------------------->>>*/ 
 void telegramHoodEvent(TBMessage t_msg){
+  String message;
     if (t_msg.text == "/status"){
       myBot.sendMessage(t_msg.sender.id, fn_telegram_status());
       }
@@ -426,7 +555,7 @@ void telegramHoodEvent(TBMessage t_msg){
       }
     else if (t_msg.text == "/sun:low"){
       sun_auto = false;
-      sun_pos = 100;
+      sun_pos = props.sun_level;
       myBot.sendMessage(t_msg.sender.id, String(sun_pos));
       }
     else if (t_msg.text == "/sun:mean"){
@@ -444,7 +573,35 @@ void telegramHoodEvent(TBMessage t_msg){
       sun_pos = 0;
       myBot.sendMessage(t_msg.sender.id, String(sun_pos));
       }
+    else {
+      telegram_4_chat(t_msg);
+      }
   }
+  
+void telegram_4_chat(TBMessage t_msg){
+  if (props.botName != fn_getParam_from_command(t_msg.text,1,'@')){
+    myBot.sendMessage(props.admin_id, t_msg.text+ ". sender_id:" +t_msg.sender.id+ " param1:"+props.botName);
+  }
+  myBot.sendMessage(props.admin_id, "param1:"+fn_getParam_from_command(t_msg.text,1,'@'));
+  myBot.sendMessage(props.admin_id, "param0:"+fn_getParam_from_command(t_msg.text,0,'@'));
+  String text;
+  text = fn_getParam_from_command(t_msg.text,0,'@');
+  String message = t_msg.text;
+    if (text == "/status"){
+      message = fn_telegram_status();
+      }
+    else if (text == "/hood"){
+      hood_auto = !hood_auto;
+      message =  String(hood_pos);
+      }
+    else if (text == "/sun"){
+      sun_auto = !sun_auto;
+      sun_pos = props.sun_level;
+      message = String(sun_pos);
+      }
+   myBot.sendMessage(props.chat_id, message);
+   myBot.sendMessage(props.admin_id, message);
+  }  
   /*
  ________________
 |t   i   m   e   |
@@ -460,7 +617,7 @@ _________________
 __________________________
 */
 String fn_telegram_status(){
-  String msg = "|-----------------------|\n"
+  String msg = "|------"+app_version+"------|\n"
   "|"+ float_param_to_str("-",t3)+"----"+float_param_to_str("-",t1)+"-|\n"+
   "|-------"+float_param_to_str("-",dht_t)+"-------|\n"+
   "|"+ float_param_to_str("-",t2)+"----"+float_param_to_str("-",t5)+"-|\n"+
@@ -482,23 +639,29 @@ void update_workload_pins(){
   analogWrite(ledPin, sun_pos);
   }
 
-float fn_sensor_average(float previos, float current, bool alert){
-  if (fn_sensor_true(previos,current, alert))
-    return current;
-  else return previos;
+bool bit_is_clear (byte b, int i){
+  return bitRead(b, i);
 }
-
-bool fn_sensor_true(float previos, float current, bool alert){
-  if (alert) 
-    return true;
-  else if(previos-current - current > sensor_tolerance and current - previos < sensor_tolerance)
-    return true;
-  else return false;
-  }
 
 String float_param_to_str(String param, float value){
   char outstr[15];
   dtostrf(value,7, 3, outstr);
   return param + value;
+}
+
+String fn_getParam_from_command(String data, int index, char separator)
+{
+    int found = 0;
+    int strIndex[] = { 0, -1 };
+    int maxIndex = data.length() - 1;
+
+    for (int i = 0; i <= maxIndex && found <= index; i++) {
+        if (data.charAt(i) == separator || i == maxIndex) {
+            found++;
+            strIndex[0] = strIndex[1] + 1;
+            strIndex[1] = (i == maxIndex) ? i+1 : i;
+        }
+    }
+    return found > index ? data.substring(strIndex[0], strIndex[1]) : "";
 }
 /* END FUNCTIONS */
